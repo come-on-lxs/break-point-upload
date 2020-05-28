@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>断点上传</title>
+  <script src="https://cdn.bootcdn.net/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vue/dist/vue.js"></script>
+  <!-- 引入样式 -->
+  <link rel="stylesheet" href="https://unpkg.zhimg.com/element-ui/lib/theme-chalk/index.css">
+  <!-- 引入组件库 -->
+  <script src="https://unpkg.zhimg.com/element-ui/lib/index.js"></script>
+  <script src="./echarts-4.7.0/package/dist/echarts.js"></script>
+</head>
+<body>
+  <div id="app">
+    <el-upload
+      class="upload-demo"
+      action=""
+      multiple
+      :limit="3"
+      :show-file-list="false"
+      :http-request="breakPointUpload"
+    >
+      <el-button size="small" type="primary">点击上传</el-button>
+    </el-upload>
+    <el-button type="primary" size="small" @click="handlePause">暂停</el-button>
+    <el-button type="primary" size='small' @click="handleResume">恢复</el-button>
+    <p>计算文件hash: {{ this.hash }}</p>
+    <el-progress :percentage="hashPercentage"></el-progress>
+    <p>文件总进度:</p>
+    <el-progress :percentage="uploadPercentage"></el-progress>
+    <el-table
+      :data="uploadData"
+    >
+      <el-table-column
+        prop="hash"
+        label="切片hash"
+      ></el-table-column>
+      <el-table-column
+        label="大小(KB)"
+      >
+        <template slot-scope="{ row }">
+          <span>{{ row.chunk && (row.chunk.size / 1024).toFixed(2) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column
+        label="进度"
+      >
+        <el-progress slot-scope="{ row }" :percentage="row.percentage"></el-progress>
+      </el-table-column>
+    </el-table>
+  </div>
+</body>
+<script>
+  const SIZE = 10 * 1024;
+  const request = function({
+    url, method = "post", data, headers = {}, onProgress = e => e, requestList
+  }) {
+    return new Promise(resolve => {
+      const xhr = new XMLHttpRequest()
+      xhr.upload.onprogress = onProgress
+      xhr.open(method, url)
+      Object.keys(headers).forEach(key => {
+        xhr.setRequestHeader(key, headers[key])
+      })
+      xhr.send(data)
+      xhr.onload = e => {
+        if(requestList) {
+          const xhrIndex = requestList.findIndex(item => item === xhr)
+          requestList.slice(xhrIndex, 1)
+        }
+        resolve(JSON.parse(e.target.response))
+      }
+      if(requestList) requestList.push(xhr)
+    })
+  }
+
+  let app = new Vue({
+    el: '#app',
+    data: {
+      file: null,
+      uploadData: [],
+      worker: null,
+      hashPercentage: 0,
+      hash: null,
+      requestList: [],
+      filetrList: [],
+      filename: '',
+    },
+    computed: {
+      uploadPercentage() {
+        if (!this.file || !this.uploadData.length) return 0;
+        const loaded = this.uploadData
+          .map(item => item.chunk.size * item.percentage)
+          .reduce((acc, cur) => acc + cur);
+        return parseInt((loaded / this.file.size).toFixed(2));
+      }
+    },
+    methods:{
+      async breakPointUpload(params) {
+        const file = params.file
+        this.file = file
+        const name = file.name
+        this.filename = name
+        const fileChunkList = this.createFileChunk(file)
+        this.hash = await this.calculateHash(fileChunkList)
+        this.uploadData = fileChunkList.map(({ file }, index) => ({
+          chunk: file,
+          hash: `${this.hash}-${index}`,
+          index,
+          percentage: 0
+        }))
+        let { code, data } = await this.verifyUpload(this.hash, name)
+        if(code === 200) {
+          this.uploadData.map(item => {
+            item.percentage = 100
+          })
+          this.$message.success('上传成功')
+        } else {
+          this.filetrList = data
+          this.uploadChunk(name)
+        }
+      },
+      // 为文件切片
+      createFileChunk(file, size = SIZE) {
+        if(!file) {
+          throw(new Error('不存在文件'))
+        }
+        let fileChunkList = []
+        let cur = 0
+        while(cur < file.size) {
+          fileChunkList.push({
+            file: file.slice(cur, cur + size)
+          })
+          cur += size
+        }
+        return fileChunkList;
+      },
+      // 多线程创建文件hash
+      calculateHash(fileChunkList) {
+        return new Promise(resolve => {
+          this.worker = new Worker("hash.js")
+          this.worker.postMessage({ fileChunkList })
+          this.worker.onmessage = e => {
+            const { percentage, hash } = e.data
+            this.hashPercentage = percentage
+            if(hash) {
+              resolve(hash)
+            }
+          }
+        })
+      },
+      // 上传
+      async uploadChunk(name) {
+        let data = this.uploadData
+        if (data && data.length < 1) {
+          throw(new Error('没有文件'))
+        }
+        let _this = this
+        let filterReauestList = data.filter(({ hash }) => !_this.filetrList.includes(hash))
+        const requestList = filterReauestList.map(({ chunk, hash, index }) => {
+          const formData = new FormData()
+          formData.append('chunk', chunk)
+          formData.append('hash', hash)
+          formData.append('name', name)
+          formData.append('fileHash', this.hash)
+          formData.append('length', filterReauestList.length)
+          formData.append('size', SIZE)
+          return {formData, index}
+        })
+        .map(({formData, index}) => {
+          this.uploadAjax(formData, e => {
+            this.uploadData[index].percentage = parseInt(String((e.loaded / e.total) * 100));
+          })
+        })
+        console.log(requestList)
+        await Promise.all(requestList);
+
+        // let _this = this
+        // setTimeout(() => {
+          // await this.mergeRequest(name)
+        // }, 5000)
+      },
+      // 上传接口
+      async uploadAjax(data, onprogress) {
+        let _this = this
+        await request({
+          url:'http://127.0.0.1:8007/upload',
+          data: data,
+          onProgress: onprogress,
+          requestList: _this.requestList
+        })
+      },
+      // 检测文件是否上传过
+      async verifyUpload(fileHash, filename) {
+        return new Promise(resolve => {
+          request({
+            url: 'http://127.0.0.1:8007/upload/check',
+            data: JSON.stringify({
+              fileHash, filename
+            }),
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          }).then(res => {
+            resolve(res)
+          })
+        })
+      },
+      // 取消
+      handlePause() {
+        this.requestList.forEach(xhr => xhr.abort())
+        this.requestList = [];
+      },
+      // 恢复
+      async handleResume() {
+        const { data } = await this.verifyUpload(this.hash, this.filename)
+        this.filetrList = data
+        this.uploadChunk(this.filename)
+      },
+      // 老的-在上传文件后发送合并接口
+      async mergeRequest(name) {
+        let _this = this
+        await $.ajax({
+          url: 'http://127.0.0.1:8007/upload/merge',
+          type: 'post',
+          data: {
+            size: SIZE,
+            filename: name
+          },
+          success(res) {
+            if(res.code === 200) {
+              _this.$message.success(res.message)
+            } else {
+              _this.$message.error(res.message)
+            }
+          }
+        })
+      }
+    }
+  })
+</script>
+<style>
+  .upload-demo{
+    display: inline-block;
+  }
+</style>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "node",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "start": "hotnode app.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {},
+  "dependencies": {
+    "@koa/cors": "^3.1.0",
+    "@koa/multer": "^2.0.2",
+    "fs-extra": "^9.0.0",
+    "hotnode": "0.0.8",
+    "koa": "^2.11.0",
+    "koa-bodyparser": "^4.3.0",
+    "koa-router": "^7.4.0",
+    "multer": "^1.4.2",
+    "multiparty": "^4.2.1"
+  }
+}
